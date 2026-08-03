@@ -2,6 +2,8 @@
 
 **Issue:** `DELETE /profiles/{profile_id}` doesn't cascade to delete associated reviews and embeddings — https://github.com/ascherj/pathreview/issues/80
 
+> **Status (Week 9): implemented.** See the "Resolved in Week 9" notes inline below for how each risk/unknown played out.
+
 ### Understand
 
 **Root cause.** Deleting a profile has two data stores to clean up: PostgreSQL (relational rows) and ChromaDB (vector embeddings). The current `delete_profile` service in `core/services/profile_service.py` only handles Postgres — it deletes the profile's `Review` and `IngestedSource` rows (and the models also declare `ondelete="CASCADE"` FKs, so Postgres would enforce that anyway). It makes **zero** calls into the vector store. Each profile's embeddings live in a dedicated ChromaDB collection named `profile_{profile_id}` (see `rag/retriever/hybrid.py:42`), and nothing deletes that collection when the profile is deleted.
@@ -14,12 +16,15 @@ Note: the endpoint docstring already *claims* "cascade delete reviews and ingest
 
 ### Map
 
-Files I expect to touch:
-- **`rag/retriever/vector_store.py`** — add a `delete_collection(collection_name)` method wrapping `self.client.delete_collection(...)`. Today the class only exposes `delete_by_source_id`, which deletes chunks *within* a collection but never the collection itself.
-- **`core/services/profile_service.py`** — in `delete_profile`, after the Postgres deletions succeed, remove the profile's embeddings by deleting the `profile_{profile_id}` collection via a `VectorStore` instance.
-- **`tests/integration/test_profile_delete_cascade_repro.py`** — flip / generalize the reproduction into a passing regression test once the fix lands (the `xfail(strict=True)` marker will XPASS and force this).
+Files touched:
+- **`rag/retriever/vector_store.py`** — added `delete_collection(collection_name)`, wrapping `self.client.delete_collection(...)` and catching `chromadb.errors.NotFoundError` specifically so it's a safe no-op when nothing was ever ingested for that profile.
+- **`core/services/profile_service.py`** — `delete_profile` now takes an optional `vector_store: VectorStore | None` param (for test injection; defaults to constructing its own `VectorStore()`) and calls `delete_collection(f"profile_{profile_id}")` *before* the Postgres deletes, so a vector-store failure aborts cleanly without touching Postgres.
+- **`api/routes/profiles.py`** — docstring only, updated to say embeddings are cascaded too. Pre-existing lint issues in this file (import order, unused import, FastAPI `Depends`-in-default patterns) were **not** touched — not caused by this change, out of scope.
+- **`tests/integration/test_profile_delete_cascade.py`** — renamed from `test_profile_delete_cascade_repro.py`; `xfail` removed, now a real regression test (embeddings gone after delete, a second profile's collection is untouched, no-embeddings profile is a safe no-op).
+- **`tests/unit/test_vector_store.py`** *(new)* — unit coverage for `delete_collection` itself.
+- **`tests/unit/test_profile_service.py`** *(new)* — unit coverage for `delete_profile`'s cascade ordering, error handling, and the default-vs-injected `VectorStore` paths.
 
-Files I expect to read but likely *not* modify: `api/routes/profiles.py` (endpoint already delegates to the service), `core/models/profile.py`, `core/models/review.py`, `core/models/ingested_source.py` (FK cascades already correct).
+Files read but not modified: `core/models/profile.py`, `core/models/review.py`, `core/models/ingested_source.py` (FK cascades were already correct).
 
 ### Plan
 
@@ -36,10 +41,13 @@ Files I expect to read but likely *not* modify: `api/routes/profiles.py` (endpoi
 
 ### Risks & unknowns
 
-- **Cross-store atomicity.** Postgres and ChromaDB can't share a transaction. If `db.commit()` succeeds but `delete_collection` throws (or vice-versa), I get a partial delete. I need to pick an order and error policy — likely delete embeddings first, then commit Postgres, and log loudly if the vector step fails — and document the trade-off. Unknown: whether the graders expect a compensating retry or just best-effort + logging.
-- **VectorStore construction / persist path.** `VectorStore(persist_dir=".chromadb")` defaults to a local embedded client, but the app config also has `vector_db_url` (an HTTP Chroma container). I need to confirm which one the running app actually uses for ingestion so I delete from the same store the embeddings were written to. Instantiating a fresh `VectorStore` inside the service may not match how ingestion instantiates it.
-- **`_record_ingested_source` is a placeholder.** In `ingestion/pipeline.py` it only logs — it doesn't actually write `IngestedSource` rows. So in the running app, ingested-source cleanup may currently be a no-op on real data; the demonstrable orphaning is the embeddings. I should note this and not over-scope into fixing ingestion.
-- **Chroma version drift.** The container pins `chromadb/chroma:0.4.22` (which crash-loops on numpy 2.0), while the installed library is `1.5.9`. API shapes (`delete_collection`, `get(where=...)`) differ across versions; I've verified `delete_collection` works on the installed embedded client, but HTTP-mode behavior is unverified.
+- **Cross-store atomicity.** Postgres and ChromaDB can't share a transaction. If `db.commit()` succeeds but `delete_collection` throws (or vice-versa), I get a partial delete.
+  - *Resolved:* `delete_profile` now deletes the vector store collection **first**, before touching Postgres. If it throws, the existing `except`/`rollback` fires and nothing in Postgres has changed — the whole request 500s and is safely retryable. Covered by `test_vector_store_failure_leaves_postgres_untouched` in `tests/unit/test_profile_service.py`.
+- **VectorStore construction / persist path.** Needed to confirm which store the running app actually writes embeddings to, so deletion targets the same one.
+  - *Resolved:* traced every call site — `VectorStore` and `IngestionPipeline` are never instantiated anywhere in the app (no route or orchestrator wires them up yet; ingestion is scaffolding with unit tests but isn't called from the API). There's no existing instantiation pattern to match, so `delete_profile` constructs `VectorStore()` with its class default (`persist_dir=".chromadb"`), and accepts an optional `vector_store` param for dependency injection in tests. Verified end-to-end against a live server: registered a user, created a profile, seeded embeddings directly into `.chromadb` under `profile_{id}`, called the real `DELETE /profiles/{id}` endpoint (got `204`), confirmed `GET` afterward returns `404` and the ChromaDB collection is gone.
+- **`_record_ingested_source` is a placeholder.** In `ingestion/pipeline.py` it only logs — it doesn't actually write `IngestedSource` rows. Confirmed and left as-is; out of scope for this issue.
+- **Chroma version drift.** The container pins `chromadb/chroma:0.4.22` (which crash-loops on numpy 2.0), while the installed library is `1.5.9`.
+  - *Resolved for this fix:* `delete_collection` raises `chromadb.errors.NotFoundError` on a missing collection on the installed `1.5.9` client — caught specifically (not a bare `except`) so real connection failures still propagate. HTTP-mode (the `vector-db` Docker container) behavior is still unverified, but nothing in the app currently talks to that container (see above), so it doesn't affect this fix.
 
 ### Edge cases
 
