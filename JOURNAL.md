@@ -59,7 +59,7 @@ None on the implementation itself. Caught and fixed one process mistake worth no
 
 ### Check-in 2 (end of week)
 
-**PR link:** [added once the PR is opened — see next message]
+**PR link:** https://github.com/ascherj/pathreview/pull/662 (currently a **draft** — awaiting peer/mentor feedback in Slack before marking it ready for review; will update this entry and re-submit once it is)
 
 **Branch:** `fix/80-cascade-delete-profile-reviews`
 
