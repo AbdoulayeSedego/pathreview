@@ -59,7 +59,7 @@ None on the implementation itself. Caught and fixed one process mistake worth no
 
 ### Check-in 2 (end of week)
 
-**PR link:** https://github.com/ascherj/pathreview/pull/662 (currently a **draft** — awaiting peer/mentor feedback in Slack before marking it ready for review; will update this entry and re-submit once it is)
+**PR link:** https://github.com/ascherj/pathreview/pull/662 (open, marked ready for review)
 
 **Branch:** `fix/80-cascade-delete-profile-reviews`
 
@@ -74,4 +74,4 @@ None on the implementation itself. Caught and fixed one process mistake worth no
 **Self-review confirmation:** [x] make check passes  [x] make test-unit passes
 *(Both against a documented pre-existing baseline, per the Week 9 instructions: `make test-unit` has 53 pre-existing failures unrelated to this change — mostly an `AsyncMock`-attribute-chaining issue under Python 3.14 in `test_review_service.py`, plus unrelated assertion mismatches in `test_skill_extractor.py`/`test_tech_detector.py`/`test_resume_parser.py`/`test_structural_chunker.py`/`test_security.py`. I diffed the full failing-test list before and after my change — identical, plus 8 new passing tests. `make lint`/`make format` have pre-existing repo-wide findings (182→180 and 52→50 respectively, both improved by cleanup in files I touched); `make typecheck` hard-stops repo-wide on a pre-existing numpy/mypy-vs-Python-3.14 incompatibility before reaching any file I changed — confirmed byte-identical output before/after. Full details in the PR description.)*
 
-**Draft PR feedback received from:** none yet — PR just opened as a draft; will update this once I get feedback in Slack and before marking it ready for review.
+**Draft PR feedback received from:** none — opened directly for review rather than requesting a Slack pre-review pass, given time constraints.
